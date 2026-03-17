@@ -14,8 +14,10 @@
 4. [Phase 2 — WAF and Firewall Rules](#phase-2--waf-and-firewall-rules)
 5. [Phase 3 — Zero Trust Access](#phase-3--zero-trust-access)
 6. [Phase 4 — Security Headers Worker](#phase-4--security-headers-worker)
-7. [Infrastructure as Code](#infrastructure-as-code)
-8. [Key Findings and Takeaways](#key-findings-and-takeaways)
+7. [Phase 5 — Bot Protection](#phase-5--bot-protection)
+8. [Phase 6 — Page Shield](#phase-6--page-shield)
+9. [Infrastructure as Code](#infrastructure-as-code)
+10. [Key Findings and Takeaways](#key-findings-and-takeaways)
 
 ---
 
@@ -38,6 +40,8 @@ The goal is to demonstrate a security-first approach to web application hardenin
 | 2 | WAF + Firewall Rules — block attacks | Complete |
 | 3 | Zero Trust Access — identity gate on protected resource | Complete |
 | 4 | Security Headers Worker — inject headers at the edge | Complete |
+| 5 | Bot Protection — block automated and AI traffic | Complete |
+| 6 | Page Shield — monitor client-side scripts | In progress |
 
 ---
 
@@ -50,9 +54,11 @@ Internet
 Cloudflare Edge (330+ cities)
     |-- DNS + DNSSEC              <- already in place
     |-- DDoS Protection           <- automatic on all plans
+    |-- Bot Fight Mode            <- Phase 5
     |-- WAF / Firewall Rules      <- Phase 2
     |-- Cloudflare Access         <- Phase 3
     |-- Cloudflare Workers        <- Phase 4
+    |-- Page Shield               <- Phase 6
     |
     v
 Azure Front Door (CDN + HTTPS)
@@ -348,6 +354,58 @@ x-frame-options: DENY
 
 ---
 
+## Phase 5 — Bot Protection
+
+### Objective
+Enable Cloudflare's built-in bot detection and AI crawler blocking to stop automated traffic from consuming resources, polluting analytics, and scraping content.
+
+### What I Enabled
+
+**Bot Fight Mode**
+
+Cloudflare assigns every incoming request a bot score from 1 to 99 — score near 1 means almost certainly a bot, score near 99 means almost certainly a real human. This scoring is trained on traffic patterns across Cloudflare's entire global network, which processes roughly 20% of all internet traffic, making it one of the most accurate bot detection systems available.
+
+When Bot Fight Mode is enabled, requests with low bot scores are served a JavaScript challenge. Real browsers solve it silently and automatically. Simple bots that cannot execute JavaScript fail the challenge and are blocked.
+
+**Block AI Bots**
+
+Cloudflare maintains a list of known AI training crawlers — bots operated by AI companies to scrape web content for training datasets. This managed rule blocks all of them from accessing the site. Content published here belongs to the site owner, not to AI training pipelines.
+
+**AI Labyrinth**
+
+When a bot crawls the site ignoring standard crawling restrictions, Cloudflare injects hidden `nofollow` links into pages that lead to AI-generated fake content. The bot follows these links and gets stuck in an endless maze of meaningless pages, wasting its compute and time. Real users never see this content because browsers do not follow `nofollow` links automatically.
+
+### Configuration
+
+| Setting | Value |
+|---|---|
+| Bot Fight Mode | On |
+| AI Labyrinth | On |
+| Block AI Bots scope | Block on all pages |
+
+<img src="docs/screenshots/12-bot-protection.png" width="700">
+
+### Why This Matters
+
+Bot traffic is one of the largest threats on the modern internet. Without bot protection, automated scrapers, vulnerability scanners, and AI crawlers can hammer an API endpoint, steal content, and pollute analytics with fake traffic. Cloudflare's bot management product is one of their core enterprise offerings — understanding how bot scoring, JS challenges, and managed bot lists work is directly relevant to their security engineering team.
+
+---
+
+## Phase 6 — Page Shield
+
+### Objective
+Monitor all JavaScript and third-party resources loading on the site to detect supply chain attacks — where an attacker compromises a third-party script to inject malicious code into your pages.
+
+### What is a Supply Chain Attack?
+
+Most websites load JavaScript from third parties — analytics, fonts, chat widgets. If one of those third parties gets compromised, the attacker can modify the script to steal data from every visitor. This is called a Magecart attack and has affected British Airways, Ticketmaster, and hundreds of other companies.
+
+Page Shield monitors every resource loading on your site, builds a baseline of what normally loads, and alerts when something unexpected appears.
+
+> In progress — monitoring enabled, waiting for script data to populate (requires 7 days of traffic data on the free tier).
+
+---
+
 ## Infrastructure as Code
 
 All Cloudflare security configuration is managed as Terraform code — no manual portal changes as the source of truth. Every rule and policy is version-controlled, auditable, and reproducible.
@@ -392,6 +450,8 @@ Every rule and policy stops threats at the point closest to the attacker — bef
 - [Cloudflare WAF Documentation](https://developers.cloudflare.com/waf/)
 - [Cloudflare Access Documentation](https://developers.cloudflare.com/cloudflare-one/policies/access/)
 - [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
+- [Cloudflare Bot Management](https://developers.cloudflare.com/bots/)
+- [Cloudflare Page Shield](https://developers.cloudflare.com/page-shield/)
 - [OWASP Top 10](https://owasp.org/www-project-top-ten/)
 - [OWASP HTTP Headers Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)
 - [Cloudflare 2025 DDoS Threat Report](https://blog.cloudflare.com/ddos-threat-report-for-2025-q4/)
