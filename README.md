@@ -10,10 +10,10 @@
 
 1. [Project Overview](#project-overview)
 2. [Architecture](#architecture)
-3. [Phase 1 — Threat Observation (Security Analytics)](#phase-1--threat-observation-security-analytics)
+3. [Phase 1 — Threat Observation](#phase-1--threat-observation)
 4. [Phase 2 — WAF and Firewall Rules](#phase-2--waf-and-firewall-rules)
 5. [Phase 3 — Zero Trust Access](#phase-3--zero-trust-access)
-6. [Phase 4 — Cloudflare Workers](#phase-4--cloudflare-workers)
+6. [Phase 4 — Security Headers Worker](#phase-4--security-headers-worker)
 7. [Infrastructure as Code](#infrastructure-as-code)
 8. [Key Findings and Takeaways](#key-findings-and-takeaways)
 
@@ -34,10 +34,10 @@ The goal is to demonstrate a security-first approach to web application hardenin
 
 | Phase | What | Status |
 |---|---|---|
-| 1 | Security Analytics — observe real traffic | ✅ Complete |
-| 2 | WAF + Firewall Rules — block attacks | ✅ Complete |
-| 3 | Zero Trust Access — identity gate on protected resource | ✅ Complete |
-| 4 | Cloudflare Workers — edge compute | 🔜 In progress |
+| 1 | Security Analytics — observe real traffic | Complete |
+| 2 | WAF + Firewall Rules — block attacks | Complete |
+| 3 | Zero Trust Access — identity gate on protected resource | Complete |
+| 4 | Security Headers Worker — inject headers at the edge | Complete |
 
 ---
 
@@ -45,39 +45,39 @@ The goal is to demonstrate a security-first approach to web application hardenin
 
 ```
 Internet
-    │
-    ▼
+    |
+    v
 Cloudflare Edge (330+ cities)
-    ├── DNS + DNSSEC              ← already in place
-    ├── DDoS Protection           ← automatic on all plans
-    ├── WAF / Firewall Rules      ← Phase 2 ✅
-    ├── Cloudflare Access         ← Phase 3 ✅
-    └── Cloudflare Workers        ← Phase 4 🔜
-    │
-    ▼
+    |-- DNS + DNSSEC              <- already in place
+    |-- DDoS Protection           <- automatic on all plans
+    |-- WAF / Firewall Rules      <- Phase 2
+    |-- Cloudflare Access         <- Phase 3
+    |-- Cloudflare Workers        <- Phase 4
+    |
+    v
 Azure Front Door (CDN + HTTPS)
-    │
-    ├── Azure Storage (Static Website — frontend)
-    │   └── /admin                ← protected by Cloudflare Access
-    └── Azure Functions (Visitor Counter API — backend)
-        │
-        └── Azure Cosmos DB
+    |
+    |-- Azure Storage (Static Website)
+    |   |-- /admin                <- protected by Cloudflare Access
+    |
+    |-- Azure Functions (Visitor Counter API)
+        |
+        |-- Azure Cosmos DB
 ```
 
 Every request to `resume.vanshbhardwaj.com` passes through Cloudflare before it ever reaches Azure. This gives a programmable security layer at the edge — close to the attacker, far from the origin.
 
 ---
 
-## Phase 1 — Threat Observation (Security Analytics)
+## Phase 1 — Threat Observation
 
 ### Objective
-Before building any defenses, observe what is actually hitting the site. Real traffic, real bots, real attack patterns. The goal was to understand the threat landscape before writing a single rule — the same way a real security engineer would approach hardening a production system.
+Before building any defenses, observe what is actually hitting the site. The goal was to understand the threat landscape before writing a single rule — the same way a real security engineer would approach hardening a production system.
 
 ### What I Looked At
 - Cloudflare Security Analytics dashboard — request volume, served vs mitigated traffic
 - HTTP method breakdown — identifying unexpected POST requests on a static site
 - Source IP analysis — identifying non-human traffic
-- Cache status distribution — understanding how traffic flows through Cloudflare's edge
 
 ### Findings
 
@@ -91,36 +91,31 @@ Before building any defenses, observe what is actually hitting the site. Real tr
 | Unique source IPs | 3 |
 | Countries | United States only |
 
+<img src="docs/screenshots/01-security-analytics.png" width="700">
+
 **Notable observation — Unknown AWS bot (`3.18.186.238`):**
 
-An IP outside my own devices made two automated requests to the site root (`/`) at 6:54 AM and 6:55 AM while no human activity was expected. A `whois` lookup confirmed the IP belongs to **Amazon EC2 (Amazon Technologies Inc., Seattle WA)** — meaning an automated process running on AWS was crawling the site.
-
-The requests loaded only the root path with no subsequent asset requests (no CSS, JS, or images), which is characteristic of an automated crawler doing reconnaissance rather than a real browser visit.
+An IP outside my own devices made two automated requests to the site root (`/`) at 6:54 AM and 6:55 AM while no human activity was expected. A `whois` lookup confirmed the IP belongs to Amazon EC2 — meaning an automated process running on AWS was crawling the site. The requests loaded only the root path with no subsequent asset requests, which is characteristic of a crawler doing reconnaissance rather than a real browser visit.
 
 ```bash
 $ whois 3.18.186.238
 OrgName: Amazon Technologies Inc.
 OrgId:   AT-88-Z
 Address: 410 Terry Ave N., Seattle WA 98109
-# Confirmed: Amazon EC2 infrastructure
 ```
 
 **Unexpected POST requests:**
 
 4 out of 12 requests used the POST method. This site is a static resume — there are no forms or endpoints that should accept POST requests from the public. This is a classic signal of automated probing.
 
-**No security rules were firing** — expected, as none had been configured yet. This confirmed the need for WAF rules.
+<img src="docs/screenshots/02-traffic-breakdown.png" width="700">
 
-> 📸 `docs/screenshots/01-security-analytics.png` — Security Analytics dashboard
-
-> 📸 `docs/screenshots/02-traffic-breakdown.png` — Top source IPs and HTTP methods
-
-**Documented observations:** [`docs/threat-observations.md`](docs/threat-observations.md)
+**Documented observations:** [docs/threat-observations.md](docs/threat-observations.md)
 
 ### What This Informed
 Two categories of rules to build in Phase 2:
 
-1. **Observation-based** — block unexpected HTTP methods on a static site, challenge known cloud provider IPs doing automated crawls
+1. **Observation-based** — block unexpected HTTP methods on a static site
 2. **Best practice** — block known attack tool User-Agents, block SQLi and XSS patterns, rate limit the API endpoint
 
 ---
@@ -128,11 +123,11 @@ Two categories of rules to build in Phase 2:
 ## Phase 2 — WAF and Firewall Rules
 
 ### Objective
-Translate the observations from Phase 1 into active defenses using Cloudflare's WAF and custom firewall rules. All rules follow the principle of **default deny** — block anything that has no legitimate reason to exist on this site.
+Translate the observations from Phase 1 into active defenses. All rules follow the principle of **default deny** — block anything that has no legitimate reason to exist on this site.
 
-All rules are version-controlled as Terraform code in [`terraform/waf.tf`](terraform/waf.tf) and were imported into Terraform state after being built and verified in the Cloudflare dashboard.
+All rules are version-controlled as Terraform code in [terraform/waf.tf](terraform/waf.tf) and were imported into Terraform state after being built and verified in the Cloudflare dashboard.
 
-> 📸 `docs/screenshots/08-rate-limit.png` — Full active rules list (4 custom + 1 rate limiting, all Active)
+<img src="docs/screenshots/08-all-rules.png" width="700">
 
 ### Rules Implemented
 
@@ -153,9 +148,9 @@ All rules are version-controlled as Terraform code in [`terraform/waf.tf`](terra
 (http.request.method ne "GET")
 ```
 
-**Why:** This is a static resume website. The only legitimate HTTP method is GET — fetching pages and assets. POST, PUT, DELETE, PATCH, and other methods have no valid use here. The 4 POST requests observed in Phase 1 analytics confirmed this. Blocking all non-GET requests eliminates an entire class of attacks including form injection and API abuse attempts against the static site.
+**Why:** This is a static resume website. The only legitimate HTTP method is GET. POST, PUT, DELETE, PATCH, and other methods have no valid use here. The 4 POST requests observed in Phase 1 confirmed this. Blocking all non-GET requests eliminates an entire class of attacks including form injection and API abuse attempts.
 
-> 📸 `docs/screenshots/03-block-non-Get.png`
+<img src="docs/screenshots/03-block-non-Get.png" width="700">
 
 ---
 
@@ -166,9 +161,9 @@ All rules are version-controlled as Terraform code in [`terraform/waf.tf`](terra
 (http.user_agent eq "")
 ```
 
-**Why:** Every legitimate browser sends a User-Agent header identifying itself. Automated bots and vulnerability scanners frequently omit this header entirely because they are not trying to impersonate a real browser. Blocking empty User-Agents eliminates a large volume of low-effort automated traffic before it consumes any origin resources.
+**Why:** Every legitimate browser sends a User-Agent header identifying itself. Automated bots and vulnerability scanners frequently omit this header because they are not pretending to be a real browser. Blocking empty User-Agents eliminates a large volume of low-effort automated traffic before it consumes any origin resources.
 
-> 📸 `docs/screenshots/04-block-empty-User-Agent.png`
+<img src="docs/screenshots/04-block-empty-User-Agent.png" width="700">
 
 ---
 
@@ -176,8 +171,8 @@ All rules are version-controlled as Terraform code in [`terraform/waf.tf`](terra
 
 **Expression:**
 ```
-(http.user_agent contains "sqlmap") or 
-(http.user_agent contains "nikto") or 
+(http.user_agent contains "sqlmap") or
+(http.user_agent contains "nikto") or
 (http.user_agent contains "nmap")
 ```
 
@@ -191,7 +186,7 @@ All rules are version-controlled as Terraform code in [`terraform/waf.tf`](terra
 
 Legitimate users never send these strings as their User-Agent. Blocking by name is a zero-false-positive rule.
 
-> 📸 `docs/screenshots/05-block-attack-scanners.png`
+<img src="docs/screenshots/05-block-attack-scanners.png" width="700">
 
 ---
 
@@ -226,9 +221,9 @@ Legitimate users never send these strings as their User-Agent. Blocking by name 
 | `../` | Path Traversal | Navigates outside web root to access system files |
 | `etc/passwd` | Path Traversal | Targets Linux user account file — classic recon target |
 
-These patterns cover the most critical categories of the **OWASP Top 10** — the industry standard list of the most dangerous web application vulnerabilities. Cloudflare's managed OWASP ruleset handles this automatically on paid plans. On the free tier these custom rules replicate that core protection manually.
+These patterns cover the most critical categories of the OWASP Top 10. Cloudflare's managed OWASP ruleset handles this automatically on paid plans. On the free tier these custom rules replicate that core protection manually.
 
-> 📸 `docs/screenshots/06-block-SQLi-XSS.png`
+<img src="docs/screenshots/06-block-SQLi-XSS.png" width="700">
 
 ---
 
@@ -241,9 +236,9 @@ These patterns cover the most critical categories of the **OWASP Top 10** — th
 - **Duration:** Block for 10 seconds
 - **Action:** Block
 
-**Why:** The visitor counter Azure Function is a public HTTP endpoint with no built-in rate limiting. Without this rule, a script could call it thousands of times per second — inflating the counter, exhausting Cosmos DB request units, and potentially taking the function down. Rate limiting at the Cloudflare edge stops abuse before it ever reaches Azure. A real human visitor calls this endpoint once per page load, so 4 requests per 10 seconds is generous for legitimate use and stops all automated abuse.
+**Why:** The visitor counter Azure Function is a public HTTP endpoint with no built-in rate limiting. Without this rule, a script could call it thousands of times per second — inflating the counter, exhausting Cosmos DB request units, and potentially taking the function down. Rate limiting at the Cloudflare edge stops abuse before it ever reaches Azure.
 
-> 📸 `docs/screenshots/07-rate-limit.png`
+<img src="docs/screenshots/07-rate-limit.png" width="700">
 
 ---
 
@@ -253,39 +248,39 @@ These patterns cover the most critical categories of the **OWASP Top 10** — th
 Demonstrate Zero Trust principles by putting an identity gate in front of a protected resource. No implicit trust — every request must prove identity before access is granted.
 
 ### What Zero Trust Means
-Traditional security assumes anyone inside the network perimeter is trusted. Zero Trust flips this — **trust nobody by default, verify every request regardless of where it comes from.**
+Traditional security assumes anyone inside the network perimeter is trusted. Zero Trust flips this — trust nobody by default, verify every request regardless of where it comes from.
 
 Cloudflare Access implements this by sitting in front of any resource and requiring authentication before the request ever reaches the origin. Unauthenticated requests are redirected to a Cloudflare-hosted login page — the origin server never sees them.
 
 ### What I Protected
 
-Created a protected admin page at `resume.vanshbhardwaj.com/admin` hosted on the same Azure Storage static website as the rest of the site. Without Cloudflare Access, this page is publicly accessible. With Access, every visitor must verify their email via a one-time PIN before the page loads.
+Created a protected admin page at `resume.vanshbhardwaj.com/admin` hosted on the same Azure Storage static website as the rest of the site. Without Cloudflare Access this page is publicly accessible. With Access, every visitor must verify their email via a one-time PIN before the page loads.
 
-**Protected resource:** [`frontend/admin/index.html`](https://github.com/VanshBhardwaj1945/azure-resume/blob/main/frontend/admin/index.html)
+**Protected resource:** [frontend/admin/index.html](https://github.com/VanshBhardwaj1945/azure-resume/blob/main/frontend/admin/index.html)
 
 ### How It Works
 
 ```
 User visits resume.vanshbhardwaj.com/admin
-        │
-        ▼
+        |
+        v
 Cloudflare Access intercepts request
-        │
-        ├── Has valid session token? → Allow through to origin
-        │
-        └── No token? → Redirect to Cloudflare login page
-                        │
-                        ▼
+        |
+        |-- Has valid session token? -> Allow through to origin
+        |
+        |-- No token? -> Redirect to Cloudflare login page
+                        |
+                        v
                 User enters email address
-                        │
-                        ▼
+                        |
+                        v
                 Cloudflare sends one-time PIN to that email
-                        │
-                        ▼
-                User enters PIN → Session token issued
-                        │
-                        ▼
-                Access granted → Origin serves the page
+                        |
+                        v
+                User enters PIN -> Session token issued
+                        |
+                        v
+                Access granted -> Origin serves the page
 ```
 
 ### Configuration
@@ -298,28 +293,58 @@ Cloudflare Access intercepts request
 | Login method | One-time PIN (email) |
 | Policy | Allow everyone who completes email verification |
 
-The policy is set to **Allow all** — anyone who can verify any email address gets in. This is appropriate for a lab/demo environment where the goal is to demonstrate the authentication flow rather than restrict specific users.
+**Source:** [terraform/access.tf](terraform/access.tf)
 
-**Source:** [`terraform/access.tf`](terraform/access.tf)
+<img src="docs/screenshots/09-access-login-prompt.png" width="700">
 
-> 📸 `docs/screenshots/09-access-login-prompt.png` — Cloudflare Access login page at `/admin`
-
-> 📸 `docs/screenshots/10-access-granted.png` — Admin page after successful authentication
+<img src="docs/screenshots/10-access-granted.png" width="700">
 
 ### Why This Matters
 
-The origin server (Azure Storage) has no authentication capability of its own — any file uploaded to the `$web` container is publicly accessible by default. Cloudflare Access adds an identity layer in front of it without touching the origin at all. This is the core value of Zero Trust — security enforced at the network edge, independent of the application itself.
+Azure Storage has no native authentication — any file in the `$web` container is publicly accessible by default. Cloudflare Access adds an identity layer in front of it without modifying the origin at all. This demonstrates that Zero Trust security can be layered on top of any resource regardless of whether that resource supports authentication natively.
 
 ---
 
-## Phase 4 — Cloudflare Workers
-
-> 🔜 Coming soon
+## Phase 4 — Security Headers Worker
 
 ### Objective
-Deploy a Cloudflare Worker to run custom security logic at the edge — extending beyond what WAF rules alone can do.
+Deploy a Cloudflare Worker to inject HTTP security headers into every response from the site. These headers instruct the browser on how to behave securely — limiting what it trusts, what it loads, and how it connects.
 
-**Source:** [`workers/rate-limiter.js`](workers/rate-limiter.js)
+**Source:** [workers/http-headers.js](workers/http-headers.js)
+
+### What Are Security Headers?
+
+When a browser loads a website, the server sends back the page along with HTTP response headers. These headers are invisible instructions that control browser behaviour. By default most servers send very few security headers, which leaves the browser open to several well-known attacks.
+
+### Headers Implemented
+
+| Header | Attack It Prevents | Value |
+|---|---|---|
+| `Content-Security-Policy` | XSS — limits what scripts and resources the browser can load | `default-src 'self'` |
+| `X-Frame-Options` | Clickjacking — prevents the site being embedded in an iframe | `DENY` |
+| `X-Content-Type-Options` | MIME sniffing — stops browsers guessing file types | `nosniff` |
+| `Strict-Transport-Security` | HTTP downgrade attacks — forces HTTPS for 1 year | `max-age=31536000; includeSubDomains; preload` |
+| `Referrer-Policy` | Referrer leakage — controls how much URL info is sent to other sites | `strict-origin-when-cross-origin` |
+| `Permissions-Policy` | Feature abuse — disables browser APIs the site does not use | `camera=(), microphone=(), geolocation=()` |
+
+### Why a Worker Instead of Configuring the Origin?
+
+Azure Storage and Azure Front Door do not provide easy control over custom response headers. A Cloudflare Worker intercepts every response at the edge and injects these headers automatically before the response reaches the user — no changes to the origin needed.
+
+### Verification
+
+After deploying the Worker and attaching it to the `resume.vanshbhardwaj.com/*` route, headers were verified live using curl:
+
+```bash
+$ curl -I -X GET https://resume.vanshbhardwaj.com
+
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+content-security-policy: default-src 'self'; script-src 'self' 'unsafe-inline'; ...
+x-content-type-options: nosniff
+x-frame-options: DENY
+```
+
+<img src="docs/screenshots/11-worker-deployed.png" width="700">
 
 ---
 
@@ -329,10 +354,10 @@ All Cloudflare security configuration is managed as Terraform code — no manual
 
 ```
 terraform/
-├── waf.tf         # WAF rulesets and custom firewall rules ✅
-├── access.tf      # Zero Trust Access application and policy ✅
-├── workers.tf     # Worker scripts and route bindings 🔜
-└── variables.tf   # Input variables (zone ID, account ID)
+|-- waf.tf         # WAF rulesets and custom firewall rules
+|-- access.tf      # Zero Trust Access application and policy
+|-- workers.tf     # Worker route bindings
+|-- variables.tf   # Input variables (zone ID, account ID)
 ```
 
 **Provider:** `cloudflare/cloudflare ~> 5`  
@@ -355,7 +380,7 @@ Rate limiting the API endpoint — the Azure Function was a completely open endp
 The analytics phase revealed real attack patterns that directly informed the rules built in Phase 2. Building rules blind would have missed site-specific threats.
 
 **Zero Trust in practice:**
-Azure Storage has no native authentication — any file in the `$web` container is public by default. Cloudflare Access adds an identity gate without modifying the origin at all. This demonstrates that Zero Trust security can be layered on top of any resource regardless of whether that resource supports authentication natively.
+Azure Storage has no native authentication — any file in the `$web` container is public by default. Cloudflare Access adds an identity gate without modifying the origin at all. Security enforced at the network edge, independent of the application itself.
 
 **Why edge-based protection matters:**
 Every rule and policy stops threats at the point closest to the attacker — before they consume any Azure infrastructure, before they touch the origin, before they cost anything.
@@ -368,4 +393,5 @@ Every rule and policy stops threats at the point closest to the attacker — bef
 - [Cloudflare Access Documentation](https://developers.cloudflare.com/cloudflare-one/policies/access/)
 - [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
 - [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [OWASP HTTP Headers Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)
 - [Cloudflare 2025 DDoS Threat Report](https://blog.cloudflare.com/ddos-threat-report-for-2025-q4/)
