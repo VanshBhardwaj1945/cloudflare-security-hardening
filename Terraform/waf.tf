@@ -7,10 +7,7 @@ terraform {
   }
 }
 
-provider "cloudflare" {
-  # API token passed via CLOUDFLARE_API_TOKEN environment variable
-  # Never hardcode credentials here
-}
+provider "cloudflare" {}
 
 # ---------------------------------------------------------------
 # Custom Firewall Rules
@@ -26,7 +23,6 @@ resource "cloudflare_ruleset" "waf_custom_rules" {
 
   rules = [
     # Rule 1 — Block non-GET methods
-    # Static site has no reason to accept POST, PUT, DELETE, PATCH etc.
     {
       action      = "block"
       description = "Block non-GET methods on static site"
@@ -35,7 +31,6 @@ resource "cloudflare_ruleset" "waf_custom_rules" {
     },
 
     # Rule 2 — Block empty User-Agent
-    # Real browsers always send a User-Agent. Empty = automated bot.
     {
       action      = "block"
       description = "Block empty User-Agent"
@@ -44,7 +39,6 @@ resource "cloudflare_ruleset" "waf_custom_rules" {
     },
 
     # Rule 3 — Block known attack tool scanners
-    # sqlmap = SQL injection tool, nikto = vuln scanner, nmap = port scanner
     {
       action      = "block"
       description = "Block known attack scanner User-Agents"
@@ -53,7 +47,6 @@ resource "cloudflare_ruleset" "waf_custom_rules" {
     },
 
     # Rule 4 — Block SQLi and XSS attempts
-    # Covers OWASP Top 10 attack patterns manually (managed ruleset requires paid plan)
     # SQL Injection: SELECT/FROM, UNION SELECT, DROP TABLE, INSERT INTO, OR 1=1
     # XSS: <script, javascript:, onerror=
     # Path Traversal: ../, etc/passwd
@@ -66,11 +59,8 @@ resource "cloudflare_ruleset" "waf_custom_rules" {
   ]
 }
 
-# ---------------------------------------------------------------
 # Rate Limiting Rule
 # Security → Security Rules → Rate limiting rules in dashboard
-# ---------------------------------------------------------------
-
 resource "cloudflare_ruleset" "rate_limiting" {
   zone_id     = var.cloudflare_zone_id
   name        = "Rate Limiting Rules"
@@ -81,7 +71,6 @@ resource "cloudflare_ruleset" "rate_limiting" {
   rules = [
     # Rule 5 — Rate limit visitor counter API
     # 10 requests per minute per IP on /api/*
-    # Stops counter inflation, Cosmos DB exhaustion, and DDoS on the function
     {
       action      = "block"
       description = "Rate limit visitor counter API — 10 req/min per IP"

@@ -13,7 +13,7 @@
 3. [Phase 1 — Threat Observation (Security Analytics)](#phase-1--threat-observation-security-analytics)
 4. [Phase 2 — WAF and Firewall Rules](#phase-2--waf-and-firewall-rules)
 5. [Phase 3 — Zero Trust Access](#phase-3--zero-trust-access)
-6. [Phase 4 — Cloudflare Workers (Rate Limiting)](#phase-4--cloudflare-workers-rate-limiting)
+6. [Phase 4 — Cloudflare Workers](#phase-4--cloudflare-workers)
 7. [Infrastructure as Code](#infrastructure-as-code)
 8. [Key Findings and Takeaways](#key-findings-and-takeaways)
 
@@ -36,8 +36,8 @@ The goal is to demonstrate a security-first approach to web application hardenin
 |---|---|---|
 | 1 | Security Analytics — observe real traffic | ✅ Complete |
 | 2 | WAF + Firewall Rules — block attacks | ✅ Complete |
-| 3 | Zero Trust / Cloudflare Access | 🔜 In progress |
-| 4 | Cloudflare Workers — edge rate limiting | 🔜 In progress |
+| 3 | Zero Trust Access — identity gate on protected resource | ✅ Complete |
+| 4 | Cloudflare Workers — edge compute | 🔜 In progress |
 
 ---
 
@@ -51,13 +51,14 @@ Cloudflare Edge (330+ cities)
     ├── DNS + DNSSEC              ← already in place
     ├── DDoS Protection           ← automatic on all plans
     ├── WAF / Firewall Rules      ← Phase 2 ✅
-    ├── Cloudflare Access         ← Phase 3 🔜
+    ├── Cloudflare Access         ← Phase 3 ✅
     └── Cloudflare Workers        ← Phase 4 🔜
     │
     ▼
 Azure Front Door (CDN + HTTPS)
     │
     ├── Azure Storage (Static Website — frontend)
+    │   └── /admin                ← protected by Cloudflare Access
     └── Azure Functions (Visitor Counter API — backend)
         │
         └── Azure Cosmos DB
@@ -141,7 +142,7 @@ All rules are version-controlled as Terraform code in [`terraform/waf.tf`](terra
 | 2 | Block empty User-Agent | Custom rule | Block |
 | 3 | Block known attack scanner User-Agents | Custom rule | Block |
 | 4 | Block SQLi and XSS attempts | Custom rule | Block |
-| 5 | Rate limit visitor counter API — 10 req/min per IP | Rate limiting | Block |
+| 5 | Rate limit visitor counter API | Rate limiting | Block |
 
 ---
 
@@ -246,25 +247,7 @@ These patterns cover the most critical categories of the **OWASP Top 10** — th
 
 ---
 
-### Terraform — Infrastructure as Code
-
-All rules were built and verified in the Cloudflare dashboard first, then imported into Terraform state so they are version-controlled and reproducible.
-
-**Import commands used:**
-```bash
-terraform import cloudflare_ruleset.waf_custom_rules zones/<zone_id>/<ruleset_id>
-terraform import cloudflare_ruleset.rate_limiting zones/<zone_id>/<ruleset_id>
-```
-
-Running `terraform plan` after import shows no changes — Terraform state matches the live configuration exactly.
-
-**Source:** [`terraform/waf.tf`](terraform/waf.tf)
-
----
-
 ## Phase 3 — Zero Trust Access
-
-> 🔜 Coming soon
 
 ### Objective
 Demonstrate Zero Trust principles by putting an identity gate in front of a protected resource. No implicit trust — every request must prove identity before access is granted.
@@ -272,9 +255,60 @@ Demonstrate Zero Trust principles by putting an identity gate in front of a prot
 ### What Zero Trust Means
 Traditional security assumes anyone inside the network perimeter is trusted. Zero Trust flips this — **trust nobody by default, verify every request regardless of where it comes from.**
 
-Cloudflare Access implements this by sitting in front of any resource and requiring authentication before the request ever reaches the origin. Unauthenticated requests are blocked at the Cloudflare edge — the origin server never sees them.
+Cloudflare Access implements this by sitting in front of any resource and requiring authentication before the request ever reaches the origin. Unauthenticated requests are redirected to a Cloudflare-hosted login page — the origin server never sees them.
+
+### What I Protected
+
+Created a protected admin page at `resume.vanshbhardwaj.com/admin` hosted on the same Azure Storage static website as the rest of the site. Without Cloudflare Access, this page is publicly accessible. With Access, every visitor must verify their email via a one-time PIN before the page loads.
+
+**Protected resource:** [`frontend/admin/index.html`](https://github.com/VanshBhardwaj1945/azure-resume/blob/main/frontend/admin/index.html)
+
+### How It Works
+
+```
+User visits resume.vanshbhardwaj.com/admin
+        │
+        ▼
+Cloudflare Access intercepts request
+        │
+        ├── Has valid session token? → Allow through to origin
+        │
+        └── No token? → Redirect to Cloudflare login page
+                        │
+                        ▼
+                User enters email address
+                        │
+                        ▼
+                Cloudflare sends one-time PIN to that email
+                        │
+                        ▼
+                User enters PIN → Session token issued
+                        │
+                        ▼
+                Access granted → Origin serves the page
+```
+
+### Configuration
+
+| Setting | Value |
+|---|---|
+| Application name | Resume Admin Panel |
+| Domain | `resume.vanshbhardwaj.com/admin` |
+| Session duration | 24 hours |
+| Login method | One-time PIN (email) |
+| Policy | Allow everyone who completes email verification |
+
+The policy is set to **Allow all** — anyone who can verify any email address gets in. This is appropriate for a lab/demo environment where the goal is to demonstrate the authentication flow rather than restrict specific users.
 
 **Source:** [`terraform/access.tf`](terraform/access.tf)
+
+> 📸 `docs/screenshots/09-access-login-prompt.png` — Cloudflare Access login page at `/admin`
+
+> 📸 `docs/screenshots/10-access-granted.png` — Admin page after successful authentication
+
+### Why This Matters
+
+The origin server (Azure Storage) has no authentication capability of its own — any file uploaded to the `$web` container is publicly accessible by default. Cloudflare Access adds an identity layer in front of it without touching the origin at all. This is the core value of Zero Trust — security enforced at the network edge, independent of the application itself.
 
 ---
 
@@ -283,7 +317,7 @@ Cloudflare Access implements this by sitting in front of any resource and requir
 > 🔜 Coming soon
 
 ### Objective
-Deploy a Cloudflare Worker to enforce custom logic at the edge — extending security beyond what WAF rules alone can do.
+Deploy a Cloudflare Worker to run custom security logic at the edge — extending beyond what WAF rules alone can do.
 
 **Source:** [`workers/rate-limiter.js`](workers/rate-limiter.js)
 
@@ -291,12 +325,12 @@ Deploy a Cloudflare Worker to enforce custom logic at the edge — extending sec
 
 ## Infrastructure as Code
 
-All Cloudflare security configuration is managed as Terraform code — no manual portal changes as the source of truth. Every rule is version-controlled, auditable, and reproducible.
+All Cloudflare security configuration is managed as Terraform code — no manual portal changes as the source of truth. Every rule and policy is version-controlled, auditable, and reproducible.
 
 ```
 terraform/
 ├── waf.tf         # WAF rulesets and custom firewall rules ✅
-├── access.tf      # Zero Trust Access policies 🔜
+├── access.tf      # Zero Trust Access application and policy ✅
 ├── workers.tf     # Worker scripts and route bindings 🔜
 └── variables.tf   # Input variables (zone ID, account ID)
 ```
@@ -320,15 +354,18 @@ Rate limiting the API endpoint — the Azure Function was a completely open endp
 **Key lesson — observe before you defend:**
 The analytics phase revealed real attack patterns that directly informed the rules built in Phase 2. Building rules blind would have missed site-specific threats.
 
+**Zero Trust in practice:**
+Azure Storage has no native authentication — any file in the `$web` container is public by default. Cloudflare Access adds an identity gate without modifying the origin at all. This demonstrates that Zero Trust security can be layered on top of any resource regardless of whether that resource supports authentication natively.
+
 **Why edge-based protection matters:**
-Every rule stops threats at the point closest to the attacker — before they consume any Azure infrastructure, before they touch the origin, before they cost anything.
+Every rule and policy stops threats at the point closest to the attacker — before they consume any Azure infrastructure, before they touch the origin, before they cost anything.
 
 ---
 
 ## References
 
 - [Cloudflare WAF Documentation](https://developers.cloudflare.com/waf/)
-- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
 - [Cloudflare Access Documentation](https://developers.cloudflare.com/cloudflare-one/policies/access/)
+- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
 - [OWASP Top 10](https://owasp.org/www-project-top-ten/)
 - [Cloudflare 2025 DDoS Threat Report](https://blog.cloudflare.com/ddos-threat-report-for-2025-q4/)
