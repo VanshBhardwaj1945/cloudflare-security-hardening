@@ -2,7 +2,7 @@
 
 > **Target:** [resume.vanshbhardwaj.com](https://resume.vanshbhardwaj.com) — a live Azure-hosted resume site  
 > **Objective:** Harden a real production web application using Cloudflare's security platform  
-> **Built on top of:** [azure-resume](https://github.com/VanshBhardwaj1945/cloud-resume-challenge-azure)
+> **Built on top of:** [azure-resume](https://github.com/VanshBhardwaj1945/azure-resume)
 
 ---
 
@@ -21,7 +21,7 @@
 
 ## Project Overview
 
-This project extends my [Azure Cloud Resume Challenge](https://github.com/VanshBhardwaj1945/cloud-resume-challenge-azure) by layering Cloudflare's security platform on top of a live production site. Rather than simulating attacks in a sandbox, everything here is implemented against real traffic on a real domain.
+This project extends my [Azure Cloud Resume Challenge](https://github.com/VanshBhardwaj1945/azure-resume) by layering Cloudflare's security platform on top of a live production site. Rather than simulating attacks in a sandbox, everything here is implemented against real traffic on a real domain.
 
 The goal is to demonstrate a security-first approach to web application hardening using Cloudflare's tooling — the same tools used to protect millions of Internet properties globally.
 
@@ -32,12 +32,12 @@ The goal is to demonstrate a security-first approach to web application hardenin
 
 **What this project adds:**
 
-| Phase | What | Why |
+| Phase | What | Status |
 |---|---|---|
-| 1 | Security Analytics | Observe real traffic and identify threats before building defenses |
-| 2 | WAF + Firewall Rules | Block OWASP Top 10 attacks, bad bots, and API abuse |
-| 3 | Zero Trust Access | Identity-gate a protected resource using Cloudflare Access |
-| 4 | Cloudflare Workers | Rate limit the Azure Function API at the edge |
+| 1 | Security Analytics — observe real traffic | ✅ Complete |
+| 2 | WAF + Firewall Rules — block attacks | ✅ Complete |
+| 3 | Zero Trust / Cloudflare Access | 🔜 In progress |
+| 4 | Cloudflare Workers — edge rate limiting | 🔜 In progress |
 
 ---
 
@@ -48,11 +48,11 @@ Internet
     │
     ▼
 Cloudflare Edge (330+ cities)
-    ├── DNS + DNSSEC          ← already in place
-    ├── DDoS Protection       ← automatic on all plans
-    ├── WAF / Firewall Rules  ← Phase 2
-    ├── Cloudflare Access     ← Phase 3
-    └── Cloudflare Workers    ← Phase 4
+    ├── DNS + DNSSEC              ← already in place
+    ├── DDoS Protection           ← automatic on all plans
+    ├── WAF / Firewall Rules      ← Phase 2 ✅
+    ├── Cloudflare Access         ← Phase 3 🔜
+    └── Cloudflare Workers        ← Phase 4 🔜
     │
     ▼
 Azure Front Door (CDN + HTTPS)
@@ -63,155 +63,265 @@ Azure Front Door (CDN + HTTPS)
         └── Azure Cosmos DB
 ```
 
-Every request to `resume.vanshbhardwaj.com` passes through Cloudflare before it ever reaches Azure. This gives us a programmable security layer at the edge — close to the attacker, far from the origin.
+Every request to `resume.vanshbhardwaj.com` passes through Cloudflare before it ever reaches Azure. This gives a programmable security layer at the edge — close to the attacker, far from the origin.
 
 ---
 
 ## Phase 1 — Threat Observation (Security Analytics)
 
 ### Objective
-Before building any defenses, observe what is actually hitting the site. Real traffic, real bots, real attack patterns.
+Before building any defenses, observe what is actually hitting the site. Real traffic, real bots, real attack patterns. The goal was to understand the threat landscape before writing a single rule — the same way a real security engineer would approach hardening a production system.
 
-### What I looked at
-- Cloudflare Security Events dashboard
-- Top threat types by request volume
-- Geographic distribution of suspicious traffic
-- Bot traffic vs human traffic breakdown
-- Requests hitting the `/api/` endpoint (Azure Function)
+### What I Looked At
+- Cloudflare Security Analytics dashboard — request volume, served vs mitigated traffic
+- HTTP method breakdown — identifying unexpected POST requests on a static site
+- Source IP analysis — identifying non-human traffic
+- Cache status distribution — understanding how traffic flows through Cloudflare's edge
 
 ### Findings
 
-> 📸 *Screenshot: Security Events dashboard — `docs/screenshots/01-security-events.png`*
+**Traffic summary (last 24 hours):**
 
-> 📸 *Screenshot: Top threats by type — `docs/screenshots/02-threat-types.png`*
+| Metric | Value |
+|---|---|
+| Total requests | 12 |
+| Served by Cloudflare edge | 7 |
+| Served by origin (Azure) | 5 |
+| Unique source IPs | 3 |
+| Countries | United States only |
 
-> 📸 *Screenshot: Bot traffic analysis — `docs/screenshots/03-bot-traffic.png`*
+**Notable observation — Unknown AWS bot (`3.18.186.238`):**
+
+An IP outside my own devices made two automated requests to the site root (`/`) at 6:54 AM and 6:55 AM while no human activity was expected. A `whois` lookup confirmed the IP belongs to **Amazon EC2 (Amazon Technologies Inc., Seattle WA)** — meaning an automated process running on AWS was crawling the site.
+
+The requests loaded only the root path with no subsequent asset requests (no CSS, JS, or images), which is characteristic of an automated crawler doing reconnaissance rather than a real browser visit.
+
+```bash
+$ whois 3.18.186.238
+OrgName: Amazon Technologies Inc.
+OrgId:   AT-88-Z
+Address: 410 Terry Ave N., Seattle WA 98109
+# Confirmed: Amazon EC2 infrastructure
+```
+
+**Unexpected POST requests:**
+
+4 out of 12 requests used the POST method. This site is a static resume — there are no forms or endpoints that should accept POST requests from the public. This is a classic signal of automated probing.
+
+**No security rules were firing** — expected, as none had been configured yet. This confirmed the need for WAF rules.
+
+> 📸 `docs/screenshots/01-security-analytics.png` — Security Analytics dashboard
+
+> 📸 `docs/screenshots/02-traffic-breakdown.png` — Top source IPs and HTTP methods
 
 **Documented observations:** [`docs/threat-observations.md`](docs/threat-observations.md)
+
+### What This Informed
+Two categories of rules to build in Phase 2:
+
+1. **Observation-based** — block unexpected HTTP methods on a static site, challenge known cloud provider IPs doing automated crawls
+2. **Best practice** — block known attack tool User-Agents, block SQLi and XSS patterns, rate limit the API endpoint
 
 ---
 
 ## Phase 2 — WAF and Firewall Rules
 
 ### Objective
-Block the threats identified in Phase 1 using Cloudflare's WAF and custom firewall rules. All rules are written as code in Terraform.
+Translate the observations from Phase 1 into active defenses using Cloudflare's WAF and custom firewall rules. All rules follow the principle of **default deny** — block anything that has no legitimate reason to exist on this site.
+
+All rules are version-controlled as Terraform code in [`terraform/waf.tf`](terraform/waf.tf) and were imported into Terraform state after being built and verified in the Cloudflare dashboard.
+
+> 📸 `docs/screenshots/08-rate-limit.png` — Full active rules list (4 custom + 1 rate limiting, all Active)
 
 ### Rules Implemented
 
-| Rule | Action | Targets |
+| Order | Rule Name | Type | Action |
+|---|---|---|---|
+| 1 | Block non-GET methods on static site | Custom rule | Block |
+| 2 | Block empty User-Agent | Custom rule | Block |
+| 3 | Block known attack scanner User-Agents | Custom rule | Block |
+| 4 | Block SQLi and XSS attempts | Custom rule | Block |
+| 5 | Rate limit visitor counter API — 10 req/min per IP | Rate limiting | Block |
+
+---
+
+### Rule 1 — Block Non-GET Methods
+
+**Expression:**
+```
+(http.request.method ne "GET")
+```
+
+**Why:** This is a static resume website. The only legitimate HTTP method is GET — fetching pages and assets. POST, PUT, DELETE, PATCH, and other methods have no valid use here. The 4 POST requests observed in Phase 1 analytics confirmed this. Blocking all non-GET requests eliminates an entire class of attacks including form injection and API abuse attempts against the static site.
+
+> 📸 `docs/screenshots/03-block-non-Get.png`
+
+---
+
+### Rule 2 — Block Empty User-Agent
+
+**Expression:**
+```
+(http.user_agent eq "")
+```
+
+**Why:** Every legitimate browser sends a User-Agent header identifying itself. Automated bots and vulnerability scanners frequently omit this header entirely because they are not trying to impersonate a real browser. Blocking empty User-Agents eliminates a large volume of low-effort automated traffic before it consumes any origin resources.
+
+> 📸 `docs/screenshots/04-block-empty-User-Agent.png`
+
+---
+
+### Rule 3 — Block Known Attack Scanner User-Agents
+
+**Expression:**
+```
+(http.user_agent contains "sqlmap") or 
+(http.user_agent contains "nikto") or 
+(http.user_agent contains "nmap")
+```
+
+**Why each tool is blocked:**
+
+| Tool | What It Does |
+|---|---|
+| `sqlmap` | Automated SQL injection tool — systematically tries hundreds of injection techniques against every input |
+| `nikto` | Web vulnerability scanner — probes for thousands of known misconfigurations and CVEs |
+| `nmap` | Network scanner — maps open ports and services for reconnaissance |
+
+Legitimate users never send these strings as their User-Agent. Blocking by name is a zero-false-positive rule.
+
+> 📸 `docs/screenshots/05-block-attack-scanners.png`
+
+---
+
+### Rule 4 — Block SQLi and XSS Attempts
+
+**Expression:**
+```
+(http.request.uri.query contains "SELECT" and http.request.uri.query contains "FROM") or
+(http.request.uri.query contains "UNION" and http.request.uri.query contains "SELECT") or
+(http.request.uri.query contains "DROP TABLE") or
+(http.request.uri.query contains "INSERT INTO") or
+(http.request.uri.query contains "OR 1=1") or
+(http.request.uri.query contains "<script") or
+(http.request.uri.query contains "javascript:") or
+(http.request.uri.query contains "onerror=") or
+(http.request.uri.query contains "../") or
+(http.request.uri.query contains "etc/passwd")
+```
+
+**Why each pattern is blocked:**
+
+| Pattern | Attack Type | What It Does |
 |---|---|---|
-| Block SQLi / XSS | Block | OWASP Top 10 attack signatures on all requests |
-| Block bad bots | Block | Known malicious user agents and bot signatures |
-| Rate limit API | Block | More than 10 requests per minute to `/api/*` |
-| Block non-GET to API | Block | PUT, DELETE, PATCH on the visitor counter endpoint |
-| Challenge suspicious ASNs | JS Challenge | High-risk ASNs with no legitimate traffic history |
+| `SELECT...FROM` | SQL Injection | Core SQL read query — extracts database contents |
+| `UNION SELECT` | SQL Injection | Joins malicious query to legitimate one to steal data from other tables |
+| `DROP TABLE` | SQL Injection | Permanently deletes database tables |
+| `INSERT INTO` | SQL Injection | Writes data directly into the database |
+| `OR 1=1` | SQL Injection | Makes WHERE conditions always true — returns all records |
+| `<script` | XSS | Injects JavaScript that executes in other users' browsers |
+| `javascript:` | XSS | Executes JS via href attributes |
+| `onerror=` | XSS | Executes JS via HTML event handlers |
+| `../` | Path Traversal | Navigates outside web root to access system files |
+| `etc/passwd` | Path Traversal | Targets Linux user account file — classic recon target |
 
-### Cloudflare Managed Ruleset
-Enabled the Cloudflare OWASP Core Ruleset — a managed set of rules maintained by Cloudflare that covers the OWASP Top 10 attack categories including:
-- **SQL Injection (SQLi)** — attacker inserts SQL code into form fields to manipulate the database
-- **Cross-Site Scripting (XSS)** — attacker injects malicious scripts into pages viewed by other users
-- **Cross-Site Request Forgery (CSRF)** — attacker tricks a user's browser into making unauthorised requests
+These patterns cover the most critical categories of the **OWASP Top 10** — the industry standard list of the most dangerous web application vulnerabilities. Cloudflare's managed OWASP ruleset handles this automatically on paid plans. On the free tier these custom rules replicate that core protection manually.
 
-### Source
-**Terraform:** [`terraform/waf.tf`](terraform/waf.tf)
+> 📸 `docs/screenshots/06-block-SQLi-XSS.png`
 
-> 📸 *Screenshot: WAF rules in Cloudflare dashboard — `docs/screenshots/04-waf-rules.png`*
+---
 
-> 📸 *Screenshot: Blocked requests in Security Events — `docs/screenshots/05-blocked-requests.png`*
+### Rule 5 — Rate Limit the Visitor Counter API
+
+**Configuration:**
+- **Match:** URI Path contains `/api/`
+- **Characteristics:** IP address
+- **Limit:** 4 requests per 10 seconds per IP
+- **Duration:** Block for 10 seconds
+- **Action:** Block
+
+**Why:** The visitor counter Azure Function is a public HTTP endpoint with no built-in rate limiting. Without this rule, a script could call it thousands of times per second — inflating the counter, exhausting Cosmos DB request units, and potentially taking the function down. Rate limiting at the Cloudflare edge stops abuse before it ever reaches Azure. A real human visitor calls this endpoint once per page load, so 4 requests per 10 seconds is generous for legitimate use and stops all automated abuse.
+
+> 📸 `docs/screenshots/07-rate-limit.png`
+
+---
+
+### Terraform — Infrastructure as Code
+
+All rules were built and verified in the Cloudflare dashboard first, then imported into Terraform state so they are version-controlled and reproducible.
+
+**Import commands used:**
+```bash
+terraform import cloudflare_ruleset.waf_custom_rules zones/<zone_id>/<ruleset_id>
+terraform import cloudflare_ruleset.rate_limiting zones/<zone_id>/<ruleset_id>
+```
+
+Running `terraform plan` after import shows no changes — Terraform state matches the live configuration exactly.
+
+**Source:** [`terraform/waf.tf`](terraform/waf.tf)
 
 ---
 
 ## Phase 3 — Zero Trust Access
 
+> 🔜 Coming soon
+
 ### Objective
 Demonstrate Zero Trust principles by putting an identity gate in front of a protected resource. No implicit trust — every request must prove identity before access is granted.
 
 ### What Zero Trust Means
-Traditional security assumes that anyone inside the network perimeter is trusted. Zero Trust assumes the opposite — **trust nobody by default, verify every request regardless of where it comes from.**
+Traditional security assumes anyone inside the network perimeter is trusted. Zero Trust flips this — **trust nobody by default, verify every request regardless of where it comes from.**
 
-Cloudflare Access implements this by sitting in front of any application and requiring authentication before the request ever reaches the origin.
+Cloudflare Access implements this by sitting in front of any resource and requiring authentication before the request ever reaches the origin. Unauthenticated requests are blocked at the Cloudflare edge — the origin server never sees them.
 
-### What I Protected
-Added a Cloudflare Access policy to a protected admin path (`/admin`) on the site. Any request to that path must authenticate via email OTP before proceeding. Unauthenticated requests are blocked at the Cloudflare edge — the origin server never sees them.
-
-### Source
-**Terraform:** [`terraform/access.tf`](terraform/access.tf)
-
-> 📸 *Screenshot: Access policy configuration — `docs/screenshots/06-access-policy.png`*
-
-> 📸 *Screenshot: Authentication prompt on protected path — `docs/screenshots/07-access-login.png`*
+**Source:** [`terraform/access.tf`](terraform/access.tf)
 
 ---
 
-## Phase 4 — Cloudflare Workers (Rate Limiting)
+## Phase 4 — Cloudflare Workers
+
+> 🔜 Coming soon
 
 ### Objective
-Deploy a Cloudflare Worker to rate limit the Azure Function API at the edge — stopping abuse before it reaches the origin.
+Deploy a Cloudflare Worker to enforce custom logic at the edge — extending security beyond what WAF rules alone can do.
 
-### Why This Matters
-The visitor counter API (`/api/visitorcount`) is a public HTTP endpoint. Without rate limiting, anyone can call it thousands of times per second, inflating the counter, exhausting Cosmos DB request units, and running up costs. By handling rate limiting at the Cloudflare edge in a Worker, we stop abuse at the closest point to the attacker.
-
-### How It Works
-
-```
-Request to /api/visitorcount
-        │
-        ▼
-Cloudflare Worker intercepts request
-        │
-        ├── Check request count for this IP in last 60 seconds
-        │
-        ├── Under limit? → Forward to Azure Function origin
-        │
-        └── Over limit? → Return 429 Too Many Requests immediately
-                          (Azure Function never receives the request)
-```
-
-### Source
-**Worker code:** [`workers/rate-limiter.js`](workers/rate-limiter.js)  
-**Terraform:** [`terraform/workers.tf`](terraform/workers.tf)
-
-> 📸 *Screenshot: Worker deployed in Cloudflare dashboard — `docs/screenshots/08-worker-deployed.png`*
-
-> 📸 *Screenshot: 429 response when rate limit exceeded — `docs/screenshots/09-rate-limit-response.png`*
+**Source:** [`workers/rate-limiter.js`](workers/rate-limiter.js)
 
 ---
 
 ## Infrastructure as Code
 
-All Cloudflare security configuration is managed as Terraform code — no manual portal changes. This ensures every rule, policy, and worker binding is version-controlled, auditable, and reproducible.
+All Cloudflare security configuration is managed as Terraform code — no manual portal changes as the source of truth. Every rule is version-controlled, auditable, and reproducible.
 
 ```
 terraform/
-├── waf.tf         # WAF rulesets and custom firewall rules
-├── access.tf      # Zero Trust Access policies
-├── workers.tf     # Worker scripts and route bindings
+├── waf.tf         # WAF rulesets and custom firewall rules ✅
+├── access.tf      # Zero Trust Access policies 🔜
+├── workers.tf     # Worker scripts and route bindings 🔜
 └── variables.tf   # Input variables (zone ID, account ID)
 ```
 
 **Provider:** `cloudflare/cloudflare ~> 5`  
-**State:** local (terraform.tfstate — gitignored)  
-**Secrets:** passed via environment variables, never committed
+**Secrets:** passed via `CLOUDFLARE_API_TOKEN` environment variable, never committed  
+**State:** local — `terraform.tfstate` gitignored
 
 ---
 
 ## Key Findings and Takeaways
 
-> *This section will be filled in after completing all four phases with real observations from the security analytics dashboard.*
-
-**What I observed in traffic:**
-- _TBD after Phase 1_
+**What I observed in real traffic:**
+- An AWS EC2 bot (`3.18.186.238`) crawled the site at 6:54–6:55 AM — confirmed via `whois` as Amazon infrastructure doing automated reconnaissance
+- 4 POST requests hit a fully static site that should only receive GETs — clear signal of automated probing
+- Zero security rules were firing before this project — the site was completely undefended at the application layer
 
 **Most impactful rule:**
-- _TBD after Phase 2_
+Rate limiting the API endpoint — the Azure Function was a completely open endpoint. A single script could have called it thousands of times, inflating the counter and exhausting Cosmos DB resources.
 
-**What I learned about Zero Trust in practice:**
-- _TBD after Phase 3_
+**Key lesson — observe before you defend:**
+The analytics phase revealed real attack patterns that directly informed the rules built in Phase 2. Building rules blind would have missed site-specific threats.
 
-**Why edge-based rate limiting is superior to origin-based:**
-- Stops malicious traffic before it consumes any origin resources
-- Adds no latency for legitimate users
-- Scales automatically with Cloudflare's network
+**Why edge-based protection matters:**
+Every rule stops threats at the point closest to the attacker — before they consume any Azure infrastructure, before they touch the origin, before they cost anything.
 
 ---
 
