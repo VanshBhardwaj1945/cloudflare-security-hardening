@@ -2,7 +2,7 @@
 
 > **Target:** [resume.vanshbhardwaj.com](https://resume.vanshbhardwaj.com) — a live Azure-hosted resume site  
 > **Objective:** Harden a real production web application using Cloudflare's security platform  
-> **Built on top of:** [azure-resume](https://github.com/VanshBhardwaj1945/azure-resume)
+> **Built on top of:** [azure-resume](https://github.com/VanshBhardwaj1945/cloud-resume-challenge-azure)
 
 ---
 
@@ -23,7 +23,7 @@
 
 ## Project Overview
 
-This project extends my [Azure Cloud Resume Challenge](https://github.com/VanshBhardwaj1945/azure-resume) by layering Cloudflare's security platform on top of a live production site. Rather than simulating attacks in a sandbox, everything here is implemented against real traffic on a real domain.
+This project extends my [Azure Cloud Resume Challenge](https://github.com/VanshBhardwaj1945/cloud-resume-challenge-azure) by layering Cloudflare's security platform on top of a live production site. Rather than simulating attacks in a sandbox, everything here is implemented against real traffic on a real domain.
 
 The goal is to demonstrate a security-first approach to web application hardening using Cloudflare's tooling — the same tools used to protect millions of Internet properties globally.
 
